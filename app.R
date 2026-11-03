@@ -12,7 +12,9 @@
 #     install.packages(c("shiny", "data.table", "ggplot2"))
 #
 # Layout (as specified):
-#   Top: Y and X selectors. Y is restricted to phq9, bmi,
+#   Top: title, then a row with the codebook on the left and a
+#     first-5-rows snapshot of the chosen Y and X on the right,
+#     then Y and X selectors. Y is restricted to phq9, bmi,
 #     depression and pov_inc_ratio; X can be any variable except
 #     less_9, nine_11, hs_ged, scoll and coll.
 #   Row 1, column 1: figure (or, for Y categorical x X categorical,
@@ -154,17 +156,35 @@ binary_code <- function(var, x) {
 # ---------------------------------------------------------------- UI
 ui <- fluidPage(
   titlePanel("Bivariate analysis: Y vs X"),
-  p("Data: NHANES 2013-2014 extract (N = 4,721 rows). Every panel uses complete cases ",
-    "for the chosen Y and X. Y-variable (outcome): phq9, bmi, ",
-    "depression or pov_inc_ratio only. X-variable (predictor): any ",
-    "variable except less_9, nine_11, hs_ged, scoll and coll. ",
-    "Continuous variables: pov_inc_ratio, bmi, phq9. The others are ",
-    "categorical; gender, male and depression are binary."),
+  # Codebook on the left, data snapshot on the right, so the
+  # right-hand space that was empty is used. The snapshot table
+  # updates with the Y/X selectors below; it is defined in the
+  # server as snapshot_table (first 5 complete cases for Y and X).
+  fluidRow(
+    column(6,
+           p("Data: NHANES 2013-2014 extract (N = 4,721 rows). Every panel uses complete cases ",
+             "for the chosen Y and X."),
+           h4("CODEBOOK:"),
+           p("Y-variable (outcome): phq9, bmi, depression (phq9 score of 10 to 27), pov_inc_ratio only."),
+           p(" X-variable (predictor): any variable. Pay attention when using depression as a function of phq9 (induce endogeneity)."),
+           p("Continuous variables: pov_inc_ratio, bmi, phq9."),
+           p("Categorical variables: gender, male and depression are binary.")),
+    column(6,
+           h4("Data snapshot: first 5 rows (Y and X)"),
+           tableOutput("snapshot_table"),
+           p("First 5 complete cases for the chosen Y and X, in file ",
+             "order. Categorical values are shown with their labels, ",
+             "as in the other panels (e.g. gender as Male/Female, ",
+             "not 1/2)."))
+  ),
   fluidRow(
     column(6, selectInput("yvar", "Y-variable (outcome)",
                           choices = y_vars, selected = "phq9")),
     column(6, selectInput("xvar", "X-variable (predictor)",
                           choices = x_vars, selected = "pov_inc_ratio"))
+  ),
+  fluidRow(
+    column(12, uiOutput("center_ui"))
   ),
   textOutput("sample_info"),
   hr(),
@@ -177,7 +197,8 @@ ui <- fluidPage(
            h4("Regression: Y as a function of X"),
            uiOutput("ref_ui"),
            verbatimTextOutput("reg_header"),
-           tableOutput("reg_table"))
+           tableOutput("reg_table"),
+           uiOutput("reg_centered_ui"))
   ),
   hr(),
   # Row 2
@@ -244,6 +265,43 @@ server <- function(input, output, session) {
   y_is_binary <- reactive(input$yvar %in% binary_vars)
   x_is_binary <- reactive(input$xvar %in% binary_vars)
 
+  # ---- Centering X (only when Y and X are both continuous) ----
+  # Ask with a checkbox; the numeric value is subtracted from X:
+  # X_center = X - value. The default value is the mean of X in
+  # complete cases (mean-centering), but the user can type any
+  # number. centering_active() is FALSE by default and whenever
+  # Y or X is not continuous, so all panels show the single
+  # uncentered version unless the user opts in. center_ui does
+  # not depend on input$center_x or input$center_value, so
+  # checking the box or typing a value does not reset the
+  # inputs; changing Y or X does reset them (new mean, box off).
+  centering_active <- reactive({
+    isTRUE(input$center_x) && y_type() == "continuous" && x_type() == "continuous"
+  })
+  center_value_num <- reactive({
+    v <- input$center_value
+    if (is.null(v) || length(v) != 1 || is.na(v) || !is.finite(v)) 0 else as.numeric(v)
+  })
+  dat_c <- reactive({
+    d <- copy(dat())
+    d[, x_center := x_raw - center_value_num()]
+    d
+  })
+
+  output$center_ui <- renderUI({
+    if (!(y_type() == "continuous" && x_type() == "continuous")) return(NULL)
+    d <- dat()
+    mean_x <- mean(d$x_raw)
+    fluidRow(
+      column(6, checkboxInput("center_x",
+                              "Center X? See centered results below. Input a centering value into the window to the right.",
+                              value = FALSE)),
+      column(6, numericInput("center_value",
+                             "Centering X: value to subtract from X (X_center = X - value):",
+                             value = mean_x))
+    )
+  })
+
   fig_type <- reactive({
     yt <- y_type()
     xt <- x_type()
@@ -254,6 +312,20 @@ server <- function(input, output, session) {
       if (y_is_binary()) "logit" else "logit_multi"
     } else "unknown"
   })
+
+  # Top-right snapshot: first 5 rows for the chosen Y and X only.
+  # dat() is already complete cases in file order, so head(., 5)
+  # is the first 5 complete cases; rows 1-5 of the file are
+  # complete for every Y/X pair, so these are also file rows 1-5.
+  # Values are the labelled values used elsewhere in the app
+  # (y_lab / x_lab): continuous as stored, categorical as labels.
+  output$snapshot_table <- renderTable({
+    d <- head(dat(), 5)
+    out <- data.table(Row = seq_len(nrow(d)))
+    out[[input$yvar]] <- d$y_lab
+    out[[input$xvar]] <- d$x_lab
+    out
+  }, rownames = FALSE, digits = 4)
 
   output$sample_info <- renderText({
     req(input$yvar, input$xvar)
@@ -307,11 +379,52 @@ server <- function(input, output, session) {
     yv <- input$yvar
     xv <- input$xvar
     if (ft == "scatter") {
-      ggplot(d, aes(x = x_raw, y = y_raw)) +
+      # Axes are locked, in both modes, so turning centering on
+      # changes nothing in the plot except the added green line:
+      # x-axis exactly the range of the X data (expand = 0, so
+      # no ggplot 5% expansion and no extension to the centered
+      # range), and y-axis the Y data range with ggplot's usual
+      # 5% padding, so the green line cannot expand either axis
+      # (it is clipped at the panel edge if it would run past
+      # the y-limits, which does not happen for ordinary center
+      # values). Points remain Y vs original X. Note:
+      # coord_cartesian alone does not do this: the built scale
+      # range still carries the 5% expansion, so the limits are
+      # set on the scales themselves, with expand = c(0, 0).
+      x_rng <- range(d$x_raw)
+      y_rng <- range(d$y_raw)
+      y_pad <- if (diff(y_rng) > 0) 0.05 * diff(y_rng) else 0.5
+      base_plot <- ggplot(d, aes(x = x_raw, y = y_raw)) +
         geom_point(alpha = 0.35) +
         geom_smooth(method = "lm", se = FALSE, colour = "red") +
+        scale_x_continuous(limits = x_rng, expand = c(0, 0)) +
+        scale_y_continuous(limits = c(y_rng[1] - y_pad, y_rng[2] + y_pad),
+                           expand = c(0, 0)) +
         labs(x = xv, y = yv, title = paste(yv, "vs", xv),
              subtitle = "Red line: OLS fit")
+      if (!centering_active()) {
+        base_plot
+      } else {
+        # Centered line, in green, drawn over the SAME x-range
+        # as the red line and the points: at each x in the
+        # original X range, y = intercept_centered + slope * x.
+        # It is therefore parallel to the red line (same slope),
+        # shifted vertically by slope * center value, with a
+        # different intercept. Drawing it over the centered
+        # range instead would have shifted the x-axis and
+        # changed the plot itself; that is the bug fixed here.
+        dc <- dat_c()
+        fit_c <- lm(y_raw ~ x_center, data = dc)
+        grid_c <- data.table(xc = seq(x_rng[1], x_rng[2], length.out = 100))
+        grid_c[, yfit := coef(fit_c)[1] + coef(fit_c)[2] * xc]
+        base_plot +
+          geom_line(data = grid_c, aes(x = xc, y = yfit),
+                    colour = "green", linewidth = 1, inherit.aes = FALSE) +
+          labs(subtitle = paste0("Red line: OLS fit, Y ~ X (uncentered). ",
+                                 "Green line: OLS fit, Y ~ X_center, drawn ",
+                                 "over the same X range (parallel line, ",
+                                 "same slope, different intercept)."))
+      }
     } else if (ft == "whisker") {
       # Whisker-only plot (no bars, by user request): a point at the
       # mean of Y in each X category, with a vertical whisker
@@ -597,9 +710,57 @@ server <- function(input, output, session) {
     co[, term := vapply(term, pretty_term, character(1))]
     # Round for display; the underlying fit is unrounded
     num_cols <- setdiff(names(co), "term")
-    co[, (num_cols) := lapply(.SD, function(x) round(x, 3)), .SDcols = num_cols]
+    co[, (num_cols) := lapply(.SD, function(x) round(x, 4)), .SDcols = num_cols]
     co
-  }, rownames = FALSE, digits = 3)
+  }, rownames = FALSE, digits = 4)
+
+  # ---- Centered regression (bottom table, only when centering) ----
+  # Top table above is uncentered; this bottom table is the same
+  # model with X_center = X - value. Only the intercept (and its
+  # standard error) changes; slope, R-squared, Root MSE and F are
+  # identical, which is the point of the exercise.
+  reg_fit_centered <- reactive({
+    lm(y_raw ~ x_center, data = dat_c())
+  })
+
+  output$reg_centered_ui <- renderUI({
+    if (!centering_active()) return(NULL)
+    tagList(
+      h5(paste0("Centered regression: ", input$yvar, " ~ ",
+                input$xvar, "_centered (", input$xvar, "_centered = ",
+                input$xvar, " - ", sprintf("%.4f", center_value_num()), ")")),
+      verbatimTextOutput("reg_header_centered"),
+      tableOutput("reg_table_centered")
+    )
+  })
+
+  output$reg_header_centered <- renderText({
+    fit <- reg_fit_centered()
+    s <- summary(fit)
+    f <- s$fstatistic
+    sprintf(paste0("Linear regression: %s ~ %s_centered\nN = %d, R-squared = %.4f, ",
+                   "adj. R-squared = %.4f, Root MSE = %.4f, ",
+                   "F(%d, %d) = %.2f, Prob > F = %.4f"),
+            input$yvar, input$xvar, nobs(fit), s$r.squared,
+            s$adj.r.squared, s$sigma, f[2], f[3], f[1],
+            pf(f[1], f[2], f[3], lower.tail = FALSE))
+  })
+
+  output$reg_table_centered <- renderTable({
+    fit <- reg_fit_centered()
+    s <- summary(fit)
+    co <- as.data.table(s$coefficients, keep.rownames = "term")
+    setnames(co, c("term", "estimate", "std_error", "statistic", "p_value"))
+    ci <- as.data.table(confint(fit), keep.rownames = "term")
+    setnames(ci, c("term", "ci_low", "ci_high"))
+    co <- merge(co, ci, by = "term", sort = FALSE)
+    setnames(co, "statistic", "t")
+    co[, term := ifelse(term == "(Intercept)", term,
+                        paste0(input$xvar, "_centered"))]
+    num_cols <- setdiff(names(co), "term")
+    co[, (num_cols) := lapply(.SD, function(x) round(x, 4)), .SDcols = num_cols]
+    co
+  }, rownames = FALSE, digits = 4)
 
   # ---- Row 2, column 1: summaries ----
   output$summary_table <- renderTable({
@@ -633,14 +794,35 @@ server <- function(input, output, session) {
       rss_label <- sprintf("RSS / (n - p) [p = %d] (linear-probability fit, reference only)",
                            length(coef(fit_lp)))
     }
-    fmt <- function(x) if (is.na(x)) "—" else sprintf("%.3f", x)
+    fmt <- function(x) if (is.na(x)) "—" else sprintf("%.4f", x)
+    if (centering_active()) {
+      # Centering does not change SD(X), correlation, covariance
+      # or RSS: SD(X - c) = SD(X), cov(Y, X - c) = cov(Y, X),
+      # corr(Y, X - c) = corr(Y, X), and the fitted residuals are
+      # identical. Showing both columns is the point of the
+      # exercise, so the values agree by construction.
+      dc <- dat_c()
+      sd_x_c <- sd(dc$x_center)
+      cor_c <- cor(dc$y_num, dc$x_center)
+      cov_c <- cov(dc$y_num, dc$x_center)
+      fit_c <- reg_fit_centered()
+      rss_c <- sum(residuals(fit_c)^2) / (n - length(coef(fit_c)))
+      return(data.table(
+        Quantity = c("N (complete cases)", "SD(Y)", "SD(X)",
+                     "Correlation(Y, X)", "Covariance(Y, X)", rss_label),
+        Uncentered = c(as.character(n), fmt(sd_y), fmt(sd_x),
+                       fmt(cor_yx), fmt(cov_yx), fmt(rss)),
+        Centered = c(as.character(n), fmt(sd_y), fmt(sd_x_c),
+                     fmt(cor_c), fmt(cov_c), fmt(rss_c))
+      ))
+    }
     data.table(
       Quantity = c("N (complete cases)", "SD(Y)", "SD(X)",
                    "Correlation(Y, X)", "Covariance(Y, X)", rss_label),
       Value = c(as.character(n), fmt(sd_y), fmt(sd_x),
                 fmt(cor_yx), fmt(cov_yx), fmt(rss))
     )
-  }, rownames = FALSE, digits = 3)
+  }, rownames = FALSE, digits = 4)
 
   # ---- Row 2, column 2: rho and beta ----
   # For a continuous Y, rho/beta are computed from Y as stored.
@@ -670,17 +852,58 @@ server <- function(input, output, session) {
     n <- nrow(d)
     if (is.na(d$y_num[1]) || is.na(d$x_num[1]) ||
         all(is.na(d$y_num)) || all(is.na(d$x_num))) {
-      return(p(paste0("rho and beta are single slopes, so they are only ",
+      return(p(paste0("a and beta are single slopes, so they are only ",
                       "defined when X is numeric (continuous or binary) ",
                       "and Y is numeric (continuous or binary). Here X = ",
                       input$xvar, " and Y = ", input$yvar,
                       " do not both meet that condition, so no single ",
-                      "rho / beta is shown. ",
+                      "a / beta is shown. ",
                       if (y_is_binary()) {
                         "For a binary Y, the per-category logit slopes, relative to the reference category, are in the regression table above."
                       } else {
                         "See the regression table above for the factor-X coefficients."
                       })))
+    }
+    if (centering_active()) {
+      # Two columns: column 1 uncentered, column 2 centered.
+      # Centering changes neither SD(X), cov, corr, a nor beta;
+      # only the intercept in the regression tables changes.
+      # The internal variable is still called rho; only the
+      # displayed text uses "a", as requested.
+      dc <- dat_c()
+      cval <- center_value_num()
+      slope_block <- function(sd_x_v, cov_v, cor_v, var_v) {
+        rho_v <- cov_v / var_v
+        beta_v <- cor_v * (sd(d$y_num) / sd_x_v)
+        diff_v <- beta_v - rho_v
+        if (abs(diff_v) < 5e-7) diff_v <- 0
+        tagList(
+          p(sprintf("a = cov(Y, X) / var(X) = %.4f / %.4f = %.4f",
+                    cov_v, var_v, rho_v)),
+          p(sprintf("beta = corr(Y, X) x (SD(Y) / SD(X)) = %.4f x (%.4f / %.4f) = %.4f",
+                    cor_v, sd(d$y_num), sd_x_v, beta_v)),
+          p(sprintf(paste0("Difference (beta - a) = %.6f. They agree ",
+                           "(up to rounding) because corr x SD(Y)/SD(X) is ",
+                           "algebraically the same as cov / var(X)."),
+                    diff_v))
+        )
+      }
+      return(tagList(
+        p(paste0("Center value: ", sprintf("%.4f", cval), " (",
+                 input$xvar, "_centered = ", input$xvar, " - ",
+                 sprintf("%.4f", cval), "). Centering does not change ",
+                 "SD(X), cov, corr, a or beta; only the intercept ",
+                 "changes (see the regression tables above).")),
+        fluidRow(
+          column(6, h5("Uncentered"),
+                 slope_block(sd(d$x_num), cov(d$y_num, d$x_num),
+                             cor(d$y_num, d$x_num), var(d$x_num))),
+          column(6, h5("Centered"),
+                 slope_block(sd(dc$x_center), cov(dc$y_num, dc$x_center),
+                             cor(dc$y_num, dc$x_center), var(dc$x_center)))
+        ),
+        p(paste0("N (complete cases) = ", n, "."))
+      ))
     }
     if (y_is_binary()) {
       y_lab <- "logit(Y)"
@@ -697,7 +920,7 @@ server <- function(input, output, session) {
         g_x <- g$x_val
         g_y <- g$logit_grp
         logit_note <- paste0("logit(", input$yvar, ") by ", input$xvar, ": ",
-                             paste0(g$x_lab, ": ", sprintf("%.3f", g$logit_grp),
+                             paste0(g$x_lab, ": ", sprintf("%.4f", g$logit_grp),
                                     collapse = ", "), ".")
         extra_note <- paste0("Correlation is 1.0000 in absolute value ",
                              "because logit(Y) is constant within each X ",
@@ -730,7 +953,7 @@ server <- function(input, output, session) {
         fit <- reg_fit()
         glm_note <- if (!is.null(fit) && length(coef(fit)) >= 2L) {
           paste0("For comparison, the logistic slope in the regression ",
-                 "panel is ", sprintf("%.3f", coef(fit)[2]),
+                 "panel is ", sprintf("%.4f", coef(fit)[2]),
                  ". The binned-logit slope above approximates it; it is ",
                  "not identical because the logit is binned and uses ",
                  "the +0.5 correction.")
@@ -763,9 +986,9 @@ server <- function(input, output, session) {
     if (abs(diff_val) < 5e-7) diff_val <- 0
     tagList(
       if (!is.null(logit_note)) p(logit_note),
-      p(sprintf("a = cov(%s, X) / var(X) = %.3f / %.3f = %.3f",
+      p(sprintf("a = cov(%s, X) / var(X) = %.4f / %.4f = %.4f",
                 y_lab, cov_yx, var_x, rho)),
-      p(sprintf("beta = corr(%s, X) x (SD(%s) / SD(X)) = %.3f x (%.3f / %.3f) = %.3f",
+      p(sprintf("beta = corr(%s, X) x (SD(%s) / SD(X)) = %.4f x (%.4f / %.4f) = %.4f",
                 y_lab, y_lab, cor_yx, sd_y, sd_x, beta)),
       # NOTE: the "because ..." text is part of the format string,
       # not extra sprintf arguments. Passing it as an argument made
