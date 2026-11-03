@@ -160,60 +160,86 @@ ui <- fluidPage(
   # right-hand space that was empty is used. The snapshot table
   # updates with the Y/X selectors below; it is defined in the
   # server as snapshot_table (first 5 complete cases for Y and X).
+  # Panel background colours (each section is wrapped in a div
+  # with a background colour and padding, so the colour fills
+  # that section only):
+  #   title description / codebook: gray80 (#CCCCCC, R's gray80;
+  #     "gray80" is not a CSS colour name, so the hex is used)
+  #   snapshot: lightblue
+  #   Y/X selectors: lightgreen
+  #   figure: lightpink
+  #   regression: lightyellow
+  #   summary statistics: gray80 (#CCCCCC)
+  #   slope by hand: light red (#FFCCCC; "lightred" is not a
+  #     standard CSS colour name, so the hex is used)
   fluidRow(
     column(6,
-           p("Data: NHANES 2013-2014 extract (N = 4,721 rows). Every panel uses complete cases ",
-             "for the chosen Y and X."),
-           h4("CODEBOOK:"),
-           p("Y-variable (outcome): phq9, bmi, depression (phq9 score of 10 to 27), pov_inc_ratio only."),
-           p(" X-variable (predictor): any variable. Pay attention when using depression as a function of phq9 (induce endogeneity)."),
-           p("Continuous variables: pov_inc_ratio, bmi, phq9."),
-           p("Categorical variables: gender, male and depression are binary.")),
+           div(style = "background-color: #CCCCCC; padding: 12px;",
+               p("Data: NHANES 2013-2014 extract (N = 4,721 rows). Every panel uses complete cases ",
+                 "for the chosen Y and X."),
+               h4("CODEBOOK:"),
+               p("Y-variable (outcome): phq9, bmi, depression (phq9 score of 10 to 27), pov_inc_ratio only."),
+               p(" X-variable (predictor): any variable. Pay attention when using depression as a function of phq9 (induce endogeneity)."),
+               p("Continuous variables: pov_inc_ratio, bmi, phq9."),
+               p("Categorical variables: gender, male and depression are binary."))),
     column(6,
-           h4("Data snapshot: first 5 rows (Y and X)"),
-           tableOutput("snapshot_table"),
-           p("First 5 complete cases for the chosen Y and X, in file ",
-             "order. Categorical values are shown with their labels, ",
-             "as in the other panels (e.g. gender as Male/Female, ",
-             "not 1/2)."))
+           div(style = "background-color: lightblue; padding: 12px;",
+               h4("Data snapshot: first 5 rows (Y and X)"),
+               tableOutput("snapshot_table"),
+               p("First 5 complete cases for the chosen Y and X, in file ",
+                 "order. Categorical values are shown with their labels, ",
+                 "as in the other panels (e.g. gender as Male/Female, ",
+                 "not 1/2). When centering is on, an extra column next ",
+                 "to X shows X_center = X - center value.")))
   ),
-  fluidRow(
-    column(6, selectInput("yvar", "Y-variable (outcome)",
-                          choices = y_vars, selected = "phq9")),
-    column(6, selectInput("xvar", "X-variable (predictor)",
-                          choices = x_vars, selected = "pov_inc_ratio"))
-  ),
-  fluidRow(
-    column(12, uiOutput("center_ui"))
-  ),
+  # The Center X? controls live inside this same lightgreen
+  # panel, below the selectors: center_ui returns NULL unless
+  # Y and X are both continuous, so the panel is just the
+  # selectors in all other cases, and the checkbox plus
+  # "Value to subtract from X" input appear on the same green
+  # background when centering is available.
+  div(style = "background-color: lightgreen; padding: 12px;",
+      fluidRow(
+        column(6, selectInput("yvar", "Y-variable (outcome)",
+                              choices = y_vars, selected = "phq9")),
+        column(6, selectInput("xvar", "X-variable (predictor)",
+                              choices = x_vars, selected = "pov_inc_ratio"))
+      ),
+      fluidRow(
+        column(12, uiOutput("center_ui"))
+      )),
   textOutput("sample_info"),
   hr(),
   # Row 1
   fluidRow(
     column(6,
-           h4("Figure: Y vs X"),
-           uiOutput("figure_panel")),
+           div(style = "background-color: lightpink; padding: 12px;",
+               h4("Figure: Y vs X"),
+               uiOutput("figure_panel"))),
     column(6,
-           h4("Regression: Y as a function of X"),
-           uiOutput("ref_ui"),
-           verbatimTextOutput("reg_header"),
-           tableOutput("reg_table"),
-           uiOutput("reg_centered_ui"))
+           div(style = "background-color: lightyellow; padding: 12px;",
+               h4("Regression: Y as a function of X"),
+               uiOutput("ref_ui"),
+               verbatimTextOutput("reg_header"),
+               tableOutput("reg_table"),
+               uiOutput("reg_centered_ui")))
   ),
   hr(),
   # Row 2
   fluidRow(
     column(6,
-           h4("Summary statistics (complete cases)"),
-           tableOutput("summary_table"),
-           p("Residual variance is RSS / (n - p), where p is the number ",
-             "of estimated coefficients including the intercept. ",
-             "For a binary Y the regression above is logistic, which ",
-             "has no RSS; the RSS shown here is then from the ",
-             "linear-probability fit and is labelled as such.")),
+           div(style = "background-color: #CCCCCC; padding: 12px;",
+               h4("Summary statistics (complete cases)"),
+               tableOutput("summary_table"),
+               p("Residual variance is RSS / (n - p), where p is the number ",
+                 "of estimated coefficients including the intercept. ",
+                 "For a binary Y the regression above is logistic, which ",
+                 "has no RSS; the RSS shown here is then from the ",
+                 "linear-probability fit and is labelled as such."))),
     column(6,
-           h4("Slope by hand: a and beta: y = alpha + a*X + e_i; or y = alpha + beta*X + e_i"),
-           uiOutput("rho_beta_panel"))
+           div(style = "background-color: orange; padding: 12px;",
+               h4("Manually compute the slope: a and beta: y = alpha + a*X + e_i; or y = alpha + beta*X + e_i"),
+               uiOutput("rho_beta_panel")))
   )
 )
 
@@ -294,10 +320,10 @@ server <- function(input, output, session) {
     mean_x <- mean(d$x_raw)
     fluidRow(
       column(6, checkboxInput("center_x",
-                              "Center X? See centered results below. Input a centering value into the window to the right.",
+                              "Center X? See centered results below. Input a value to center X into the window to the right.",
                               value = FALSE)),
       column(6, numericInput("center_value",
-                             "Centering X: value to subtract from X (X_center = X - value):",
+                             "Centering X: input value to subtract from X (X_center = X - value):",
                              value = mean_x))
     )
   })
@@ -324,6 +350,16 @@ server <- function(input, output, session) {
     out <- data.table(Row = seq_len(nrow(d)))
     out[[input$yvar]] <- d$y_lab
     out[[input$xvar]] <- d$x_lab
+    # When centering is on, add X_center immediately next to X:
+    # X_center = X - center value, same first 5 rows, same order.
+    # centering_active() is FALSE for non-continuous pairs and
+    # when the box is unchecked, so the column appears only in
+    # the centering case. The column name matches the centered
+    # regression term, e.g. pov_inc_ratio_centered.
+    if (centering_active()) {
+      dc <- head(dat_c(), 5)
+      out[[paste0(input$xvar, "_centered")]] <- dc$x_center
+    }
     out
   }, rownames = FALSE, digits = 4)
 
