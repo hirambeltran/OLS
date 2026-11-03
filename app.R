@@ -1,16 +1,3 @@
-# after checking that the app runs fine locally, then run the code below to create the file "manifest.json"
-# the manifest file also goes in the same folder in GitHub with the app file
-# VERY IMPORTANT: the file with the app must be named "app.R", otherwise the file is not published
- # rsconnect::writeManifest(
- #  appDir = getwd(),
- #   appFiles = c("app.R", "data_for_class.csv"), # Add "data.csv" here if you have one!
- #   appPrimaryDoc = "app.R"
- # )
-
-# then  Push to GitHub
-
-# Deploy to Posit Connect Cloud
-
 # app.R -- Shiny app for bivariate analysis, Y vs X
 # Built from Bivariate_and_OLS.R (step 1) and Data_for_thisclass_noNAs.dta
 # transformed to R as data_for_class.csv in this folder.
@@ -25,7 +12,9 @@
 #     install.packages(c("shiny", "data.table", "ggplot2"))
 #
 # Layout (as specified):
-#   Top: Y and X selectors.
+#   Top: Y and X selectors. Y is restricted to phq9, bmi,
+#     depression and pov_inc_ratio; X can be any variable except
+#     less_9, nine_11, hs_ged, scoll and coll.
 #   Row 1, column 1: figure (or, for Y categorical x X categorical,
 #     two tables side by side in the same position).
 #   Row 1, column 2: regression table, Y as a function of X.
@@ -33,7 +22,9 @@
 #     residual variance RSS / (n - p), where p is the number of
 #     estimated coefficients including the intercept.
 #   Row 2, column 2: rho = cov(Y,X) / var(X) and
-#     beta = corr(Y,X) * (SD(Y) / SD(X)).
+#     beta = corr(Y,X) * (SD(Y) / SD(X)), with Y replaced by
+#     logit(Y) at group level when Y is dichotomous (see the
+#     rho/beta panel code).
 #
 # Decisions and definitions, stated here so the app is not ambiguous:
 # * Variables: pov_inc_ratio, bmi and phq9 are continuous. All other
@@ -107,10 +98,17 @@ library(ggplot2)
 # ---------------------------------------------------------------- data
 dt_all <- fread("data_for_class.csv")
 
-# Variables available for selection, in file order
+# Variables in the file, in file order
 all_vars <- c("gender", "pov_inc_ratio", "education", "bmi", "phq9",
               "ethnicity", "male", "less_9", "nine_11", "hs_ged",
               "scoll", "coll", "depression")
+# Variables available for selection (user restriction):
+# Y (outcome) only: phq9, bmi, depression, pov_inc_ratio.
+# X (predictor): all variables except the education dummies
+#   less_9, nine_11, hs_ged, scoll, coll.
+y_vars <- c("phq9", "bmi", "depression", "pov_inc_ratio")
+x_vars <- setdiff(all_vars, c("less_9", "nine_11", "hs_ged",
+                              "scoll", "coll"))
 continuous_vars <- c("pov_inc_ratio", "bmi", "phq9")
 categorical_vars <- setdiff(all_vars, continuous_vars)
 binary_vars <- c("gender", "male", "less_9", "nine_11", "hs_ged",
@@ -156,15 +154,17 @@ binary_code <- function(var, x) {
 # ---------------------------------------------------------------- UI
 ui <- fluidPage(
   titlePanel("Bivariate analysis: Y vs X"),
-  p("Data: NHANES extract (N = 4,721 rows). Every panel uses complete cases ",
-    "for the chosen Y and X. Continuous variables: pov_inc_ratio, bmi, ",
-    "phq9. All others are categorical; gender, male, the education ",
-    "dummies and depression are binary."),
+  p("Data: NHANES 2013-2014 extract (N = 4,721 rows). Every panel uses complete cases ",
+    "for the chosen Y and X. Y-variable (outcome): phq9, bmi, ",
+    "depression or pov_inc_ratio only. X-variable (predictor): any ",
+    "variable except less_9, nine_11, hs_ged, scoll and coll. ",
+    "Continuous variables: pov_inc_ratio, bmi, phq9. The others are ",
+    "categorical; gender, male and depression are binary."),
   fluidRow(
     column(6, selectInput("yvar", "Y-variable (outcome)",
-                          choices = all_vars, selected = "phq9")),
+                          choices = y_vars, selected = "phq9")),
     column(6, selectInput("xvar", "X-variable (predictor)",
-                          choices = all_vars, selected = "pov_inc_ratio"))
+                          choices = x_vars, selected = "pov_inc_ratio"))
   ),
   textOutput("sample_info"),
   hr(),
@@ -191,7 +191,7 @@ ui <- fluidPage(
              "has no RSS; the RSS shown here is then from the ",
              "linear-probability fit and is labelled as such.")),
     column(6,
-           h4("Slope by hand: a and beta"),
+           h4("Slope by hand: a and beta: y = alpha + a*X + e_i; or y = alpha + beta*X + e_i"),
            uiOutput("rho_beta_panel"))
   )
 )
@@ -292,9 +292,8 @@ server <- function(input, output, session) {
       p(sprintf(paste0(
         "Logit is only defined for a binary Y. %s has %d categories, ",
         "so there is no single logit(Y) to plot against %s. ",
-        "Choose a binary Y (depression, gender, male, or an education ",
-        "dummy) for the logit plot, or use a categorical X to see the ",
-        "counts and odds-ratio tables."),
+        "Choose depression as Y for the logit plot, or use a ",
+        "categorical X to see the counts and odds-ratio tables."),
         input$yvar,
         length(unique(dat()$y_raw)), input$xvar))
     } else {
@@ -598,9 +597,9 @@ server <- function(input, output, session) {
     co[, term := vapply(term, pretty_term, character(1))]
     # Round for display; the underlying fit is unrounded
     num_cols <- setdiff(names(co), "term")
-    co[, (num_cols) := lapply(.SD, function(x) round(x, 4)), .SDcols = num_cols]
+    co[, (num_cols) := lapply(.SD, function(x) round(x, 3)), .SDcols = num_cols]
     co
-  }, rownames = FALSE, digits = 4)
+  }, rownames = FALSE, digits = 3)
 
   # ---- Row 2, column 1: summaries ----
   output$summary_table <- renderTable({
@@ -634,53 +633,151 @@ server <- function(input, output, session) {
       rss_label <- sprintf("RSS / (n - p) [p = %d] (linear-probability fit, reference only)",
                            length(coef(fit_lp)))
     }
-    fmt <- function(x) if (is.na(x)) "—" else sprintf("%.4f", x)
+    fmt <- function(x) if (is.na(x)) "—" else sprintf("%.3f", x)
     data.table(
       Quantity = c("N (complete cases)", "SD(Y)", "SD(X)",
                    "Correlation(Y, X)", "Covariance(Y, X)", rss_label),
       Value = c(as.character(n), fmt(sd_y), fmt(sd_x),
                 fmt(cor_yx), fmt(cov_yx), fmt(rss))
     )
-  }, rownames = FALSE, digits = 4)
+  }, rownames = FALSE, digits = 3)
 
   # ---- Row 2, column 2: rho and beta ----
+  # For a continuous Y, rho/beta are computed from Y as stored.
+  # For a dichotomous Y, they are computed from logit(Y), not
+  # from the 0/1 Y, because the logistic model is linear in the
+  # logits. A single logit value per observation does not exist
+  # (logit(0) = -Inf, logit(1) = +Inf), so the logit is taken at
+  # group level, exactly as in the logit figure:
+  #  - X categorical (binary): one group per X category, logit =
+  #    log(p / (1 - p)) with p = proportion Y = 1 in the category
+  #    (exact, so rho = beta = the log odds ratio, matching the
+  #    logistic coefficient). X is the binary coding (e.g. gender:
+  #    Male = 0, Female = 1).
+  #  - X continuous: X quantile bins (up to 10, the same bins as
+  #    the logit figure), logit = empirical logit
+  #    log((y_sum + 0.5) / (n - y_sum + 0.5)) in each bin, X =
+  #    bin mean X. This binned slope approximates, but is not
+  #    identical to, the logistic slope in the regression panel.
+  # The SD / covariance / correlation below are therefore for
+  # logit(Y) at group level when Y is binary, not for the 0/1 Y
+  # shown in the summary panel (row 2, column 1). For a
+  # multi-category X there is no single slope, so no rho/beta
+  # is shown; the per-category logit slopes are in the
+  # regression table, relative to the reference category.
   output$rho_beta_panel <- renderUI({
     d <- dat()
     n <- nrow(d)
     if (is.na(d$y_num[1]) || is.na(d$x_num[1]) ||
         all(is.na(d$y_num)) || all(is.na(d$x_num))) {
-      return(p(paste0("a and beta are single slopes, so they are only ",
+      return(p(paste0("rho and beta are single slopes, so they are only ",
                       "defined when X is numeric (continuous or binary) ",
                       "and Y is numeric (continuous or binary). Here X = ",
                       input$xvar, " and Y = ", input$yvar,
                       " do not both meet that condition, so no single ",
-                      "a / beta is shown. See the regression table ",
-                      "above for the factor-X coefficients.")))
+                      "rho / beta is shown. ",
+                      if (y_is_binary()) {
+                        "For a binary Y, the per-category logit slopes, relative to the reference category, are in the regression table above."
+                      } else {
+                        "See the regression table above for the factor-X coefficients."
+                      })))
     }
-    sd_y <- sd(d$y_num)
-    sd_x <- sd(d$x_num)
-    cov_yx <- cov(d$y_num, d$x_num)
-    cor_yx <- cor(d$y_num, d$x_num)
-    rho <- cov_yx / var(d$x_num)
+    if (y_is_binary()) {
+      y_lab <- "logit(Y)"
+      if (x_type() == "categorical") {
+        # One group per X category, exact category logit
+        g <- d[, .(n_grp = .N, y_sum = sum(y_bin)), by = .(x_val = x_bin, x_lab)]
+        setorder(g, x_val)
+        g[, p_grp := y_sum / n_grp]
+        # Exact logit, except for a 0 or 1 proportion, where the
+        # +0.5 empirical logit is used so the value stays finite
+        g[, logit_grp := ifelse(p_grp > 0 & p_grp < 1,
+                                log(p_grp / (1 - p_grp)),
+                                log((y_sum + 0.5) / (n_grp - y_sum + 0.5)))]
+        g_x <- g$x_val
+        g_y <- g$logit_grp
+        logit_note <- paste0("logit(", input$yvar, ") by ", input$xvar, ": ",
+                             paste0(g$x_lab, ": ", sprintf("%.3f", g$logit_grp),
+                                    collapse = ", "), ".")
+        extra_note <- paste0("Correlation is 1.0000 in absolute value ",
+                             "because logit(Y) is constant within each X ",
+                             "category, so it is exactly linear in the ",
+                             "binary X.")
+        n_note <- paste0("Groups: ", nrow(g), " X categories, from N = ",
+                         n, " complete cases.")
+        glm_note <- NULL
+      } else {
+        # X continuous: quantile bins, same as the logit figure
+        d2 <- d[order(x_raw)]
+        qs <- unique(quantile(d2$x_raw, probs = seq(0, 1, by = 0.1),
+                              na.rm = TRUE, names = FALSE))
+        if (length(qs) < 3L) {
+          d2[, bin := x_raw]
+        } else {
+          d2[, bin := cut(x_raw, breaks = qs, include.lowest = TRUE)]
+        }
+        bins <- d2[, .(mean_x = mean(x_raw), n_grp = .N,
+                       y_sum = sum(y_bin)), by = bin]
+        bins[, logit_grp := log((y_sum + 0.5) / (n_grp - y_sum + 0.5))]
+        g_x <- bins$mean_x
+        g_y <- bins$logit_grp
+        logit_note <- paste0("logit(", input$yvar, ") is the empirical logit ",
+                             "in ", nrow(bins), " X quantile bins (the same ",
+                             "bins as the logit figure).")
+        extra_note <- NULL
+        n_note <- paste0("Groups: ", nrow(bins), " X bins, from N = ",
+                         n, " complete cases.")
+        fit <- reg_fit()
+        glm_note <- if (!is.null(fit) && length(coef(fit)) >= 2L) {
+          paste0("For comparison, the logistic slope in the regression ",
+                 "panel is ", sprintf("%.3f", coef(fit)[2]),
+                 ". The binned-logit slope above approximates it; it is ",
+                 "not identical because the logit is binned and uses ",
+                 "the +0.5 correction.")
+        } else {
+          NULL
+        }
+      }
+      sd_y <- sd(g_y)
+      sd_x <- sd(g_x)
+      cov_yx <- cov(g_y, g_x)
+      cor_yx <- cor(g_y, g_x)
+      var_x <- var(g_x)
+    } else {
+      y_lab <- "Y"
+      sd_y <- sd(d$y_num)
+      sd_x <- sd(d$x_num)
+      cov_yx <- cov(d$y_num, d$x_num)
+      cor_yx <- cor(d$y_num, d$x_num)
+      var_x <- var(d$x_num)
+      logit_note <- NULL
+      extra_note <- NULL
+      n_note <- paste0("N (complete cases) = ", n, ".")
+      glm_note <- NULL
+    }
+    rho <- cov_yx / var_x
     beta <- cor_yx * (sd_y / sd_x)
     # Avoid a "-0.000000" display when the difference is a tiny
     # negative floating-point residue: at 6 decimals it is 0.
     diff_val <- beta - rho
     if (abs(diff_val) < 5e-7) diff_val <- 0
     tagList(
-      p(sprintf("a = cov(Y, X) / var(X) = %.4f / %.4f = %.4f",
-                cov_yx, var(d$x_num), rho)),
-      p(sprintf("beta = corr(Y, X) x (SD(Y) / SD(X)) = %.4f x (%.4f / %.4f) = %.4f",
-                cor_yx, sd_y, sd_x, beta)),
+      if (!is.null(logit_note)) p(logit_note),
+      p(sprintf("a = cov(%s, X) / var(X) = %.3f / %.3f = %.3f",
+                y_lab, cov_yx, var_x, rho)),
+      p(sprintf("beta = corr(%s, X) x (SD(%s) / SD(X)) = %.3f x (%.3f / %.3f) = %.3f",
+                y_lab, y_lab, cor_yx, sd_y, sd_x, beta)),
       # NOTE: the "because ..." text is part of the format string,
       # not extra sprintf arguments. Passing it as an argument made
       # sprintf try to format a character string with %.6f, giving
       # "invalid format '%.6f'; use format %s for character objects".
       p(sprintf(paste0("Difference (beta - a) = %.6f. They agree ",
-                       "(up to rounding) because corr x SD(Y)/SD(X) is ",
+                       "(up to rounding) because corr x SD(%s)/SD(X) is ",
                        "algebraically the same as cov / var(X)."),
-                diff_val)),
-      p("N (complete cases) = ", n, ".")
+                diff_val, y_lab)),
+      if (!is.null(extra_note)) p(extra_note),
+      if (!is.null(glm_note)) p(glm_note),
+      p(n_note)
     )
   })
 }
