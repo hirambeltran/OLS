@@ -237,7 +237,7 @@ ui <- fluidPage(
                  "has no RSS; the RSS shown here is then from the ",
                  "linear-probability fit and is labelled as such."))),
     column(6,
-           div(style = "background-color: orange; padding: 12px;",
+           div(style = "background-color: #FFCCCC; padding: 12px;",
                h4("Manually compute the slope: a and beta: y = alpha + a*X + e_i; or y = alpha + beta*X + e_i"),
                uiOutput("rho_beta_panel")))
   )
@@ -320,10 +320,10 @@ server <- function(input, output, session) {
     mean_x <- mean(d$x_raw)
     fluidRow(
       column(6, checkboxInput("center_x",
-                              "Center X? See centered results below. Input a value to center X into the window to the right.",
+                              "Center X? (also show centered results)",
                               value = FALSE)),
       column(6, numericInput("center_value",
-                             "Centering X: input value to subtract from X (X_center = X - value):",
+                             "Value to subtract from X (X_center = X - value):",
                              value = mean_x))
     )
   })
@@ -893,7 +893,8 @@ server <- function(input, output, session) {
                       "and Y is numeric (continuous or binary). Here X = ",
                       input$xvar, " and Y = ", input$yvar,
                       " do not both meet that condition, so no single ",
-                      "a / beta is shown. ",
+                      "a / beta is shown, and no single intercept from ",
+                      "mean(Y) - slope * mean(X) is shown either. ",
                       if (y_is_binary()) {
                         "For a binary Y, the per-category logit slopes, relative to the reference category, are in the regression table above."
                       } else {
@@ -924,6 +925,21 @@ server <- function(input, output, session) {
                     diff_v))
         )
       }
+      # Intercept, by hand, in the same two columns. The line
+      # passes through (mean X, mean Y), so
+      #   alpha = mean(Y) - slope * mean(X),
+      # with a MINUS sign: mean(Y) + slope * mean(X) would give
+      # 2.027 for phq9/pov_inc_ratio, not the regression
+      # intercept 4.5974. Slope is the same in both columns;
+      # only mean(X) changes, to mean(X_center).
+      mean_y_c <- mean(d$y_num)
+      slope_c <- cov(d$y_num, d$x_num) / var(d$x_num)
+      intercept_block <- function(mean_x_v, x_lab_v) {
+        alpha_v <- mean_y_c - slope_c * mean_x_v
+        p(sprintf(paste0("alpha = mean(Y) - slope * mean(%s) = %.4f - ",
+                         "%.4f x %.4f = %.4f (up to rounding)"),
+                  x_lab_v, mean_y_c, slope_c, mean_x_v, alpha_v))
+      }
       return(tagList(
         p(paste0("Center value: ", sprintf("%.4f", cval), " (",
                  input$xvar, "_centered = ", input$xvar, " - ",
@@ -938,6 +954,40 @@ server <- function(input, output, session) {
                  slope_block(sd(dc$x_center), cov(dc$y_num, dc$x_center),
                              cor(dc$y_num, dc$x_center), var(dc$x_center)))
         ),
+        h4("Manually compute the intercept"),
+        fluidRow(
+          column(6, h5("Uncentered"),
+                 intercept_block(mean(d$x_num), "X")),
+          # NOTE on the sign: with X_center = X - c,
+          #   Y = alpha_unc + beta * X
+          #     = alpha_unc + beta * (X_center + c)
+          #     = (alpha_unc + beta * c) + beta * X_center,
+          # so intercept_c = intercept_unc + beta * c, with a
+          # PLUS sign. The minus version would give, for
+          # phq9/pov_inc_ratio at c = 1,
+          # 4.5974 - (-0.5072) * 1 = 5.1046, not the centered
+          # regression intercept 4.0903; the plus version gives
+          # 4.5974 + (-0.5072) * 1 = 4.0903, which matches.
+          column(6, h5("Centered: note that intercept_c = intercept_unc + beta*c, where c=centering value"),
+                 intercept_block(mean(dc$x_center), "X_center"),
+                 # Second approach, underneath the first, for the
+                 # centered intercept only: alpha_c from the
+                 # uncentered regression intercept, not from the
+                 # means. alpha_unc is the (Intercept) in the top
+                 # (uncentered) regression table; beta is the
+                 # slope a above, and c is the center value.
+                 # Both approaches give the same alpha_c.
+                 {
+                   alpha_unc <- coef(reg_fit())[1]
+                   alpha_c2 <- alpha_unc + slope_c * cval
+                   p(sprintf(paste0("Second approach: alpha_c = alpha_unc + beta*c = ",
+                                    "%.4f + %.4f x %.4f = %.4f (up to rounding)"),
+                             alpha_unc, slope_c, cval, alpha_c2))
+                 })
+        ),
+        p("The uncentered intercept matches the top regression table, ",
+          "and the centered intercept matches the bottom (centered) ",
+          "regression table, up to rounding."),
         p(paste0("N (complete cases) = ", n, "."))
       ))
     }
@@ -965,6 +1015,17 @@ server <- function(input, output, session) {
         n_note <- paste0("Groups: ", nrow(g), " X categories, from N = ",
                          n, " complete cases.")
         glm_note <- NULL
+        # Intercept by hand, logit scale: the logit line passes
+        # through the group-size-weighted mean point, so
+        # alpha = weighted mean(logit(Y)) - slope * mean(X),
+        # where mean(X) is the weighted mean of the binary X
+        # coding (the proportion with X = 1). Unweighted mean
+        # of the two category logits would not give the
+        # logistic intercept unless the groups were equal size.
+        intercept_mean_y <- sum(g$n_grp * g$logit_grp) / sum(g$n_grp)
+        intercept_mean_x <- sum(g$n_grp * g$x_val) / sum(g$n_grp)
+        intercept_is_binned <- FALSE
+        intercept_glm_note <- NULL
       } else {
         # X continuous: quantile bins, same as the logit figure
         d2 <- d[order(x_raw)]
@@ -996,6 +1057,23 @@ server <- function(input, output, session) {
         } else {
           NULL
         }
+        # Intercept by hand, logit scale, same weighted-mean
+        # point as above, with X = bin-mean X weighted by bin n
+        # (which is the overall mean X). Like the slope, this
+        # binned intercept approximates, but does not equal, the
+        # logistic intercept, for the same binning reason.
+        intercept_mean_y <- sum(bins$n_grp * bins$logit_grp) / sum(bins$n_grp)
+        intercept_mean_x <- sum(bins$n_grp * bins$mean_x) / sum(bins$n_grp)
+        intercept_is_binned <- TRUE
+        intercept_glm_note <- if (!is.null(fit) && length(coef(fit)) >= 1L) {
+          paste0("For comparison, the logistic intercept in the regression ",
+                 "panel is ", sprintf("%.4f", coef(fit)[1]),
+                 ". The binned-logit intercept above approximates it; it is ",
+                 "not identical because the logit is binned and uses ",
+                 "the +0.5 correction.")
+        } else {
+          NULL
+        }
       }
       sd_y <- sd(g_y)
       sd_x <- sd(g_x)
@@ -1013,6 +1091,12 @@ server <- function(input, output, session) {
       extra_note <- NULL
       n_note <- paste0("N (complete cases) = ", n, ".")
       glm_note <- NULL
+      # Intercept by hand: the line passes through
+      # (mean X, mean Y), so alpha = mean(Y) - slope * mean(X).
+      intercept_mean_y <- mean(d$y_num)
+      intercept_mean_x <- mean(d$x_num)
+      intercept_is_binned <- FALSE
+      intercept_glm_note <- NULL
     }
     rho <- cov_yx / var_x
     beta <- cor_yx * (sd_y / sd_x)
@@ -1020,6 +1104,13 @@ server <- function(input, output, session) {
     # negative floating-point residue: at 6 decimals it is 0.
     diff_val <- beta - rho
     if (abs(diff_val) < 5e-7) diff_val <- 0
+    # Intercept by hand, underneath the slope section, in the
+    # same (light red) panel. Note the MINUS sign, as corrected:
+    # alpha = mean(Y) - slope * mean(X). For a binary Y, Y here
+    # is logit(Y) and the means are the group-size-weighted
+    # means defined in the branch above, so the intercept is on
+    # the log-odds scale; for a continuous Y it is on the Y scale.
+    alpha <- intercept_mean_y - rho * intercept_mean_x
     tagList(
       if (!is.null(logit_note)) p(logit_note),
       p(sprintf("a = cov(%s, X) / var(X) = %.4f / %.4f = %.4f",
@@ -1036,6 +1127,22 @@ server <- function(input, output, session) {
                 diff_val, y_lab)),
       if (!is.null(extra_note)) p(extra_note),
       if (!is.null(glm_note)) p(glm_note),
+      h4("Manually compute the intercept"),
+      p(sprintf(paste0("alpha = mean(%s) - slope * mean(X) = %.4f - ",
+                       "%.4f x %.4f = %.4f (up to rounding)"),
+                y_lab, intercept_mean_y, rho, intercept_mean_x, alpha)),
+      if (y_is_binary()) {
+        p("mean(logit(Y)) and mean(X) above are the group-size-weighted ",
+          "means of the category / bin logits and X values.")
+      },
+      if (intercept_is_binned) {
+        p("This binned-logit intercept approximates, but does not equal, ",
+          "the logistic intercept, for the same binning reason as the slope.")
+      } else {
+        p("This matches the intercept in the regression table above, ",
+          "up to rounding.")
+      },
+      if (!is.null(intercept_glm_note)) p(intercept_glm_note),
       p(n_note)
     )
   })
